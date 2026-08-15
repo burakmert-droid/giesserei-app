@@ -10,7 +10,7 @@ UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# --- E-MAIL VERTEILER FUNKTION ---
+# --- E-MAIL VERTEILER FUNKTION (MIT SICHERHEITS-CATCH) ---
 def send_flipchart_email(empfaenger_email, foto_path, thema=""):
     smtp_server = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
     smtp_port = int(os.environ.get('SMTP_PORT', 587))
@@ -18,38 +18,39 @@ def send_flipchart_email(empfaenger_email, foto_path, thema=""):
     sender_password = os.environ.get('SMTP_PASSWORD', '')
 
     if not sender_email or not sender_password:
-        print("E-Mail Zugangsdaten nicht konfiguriert.")
+        print("❌ FEHLER: SMTP_EMAIL oder SMTP_PASSWORD fehlt in den Render Variables!")
         return False
 
-    msg = EmailMessage()
-    datum_str = datetime.now().strftime('%d.%m.%Y %H:%M')
-    
-    msg['Subject'] = f"📸 Neues Flipchart-Foto: {thema if thema else datum_str}"
-    msg['From'] = sender_email
-    msg['To'] = empfaenger_email
-
-    body_text = f"Hallo zusammen,\n\nanbei befindet sich ein neues Flipchart-Foto vom {datum_str}.\n"
-    if thema:
-        body_text += f"Thema / Betreff: {thema}\n"
-    body_text += "\nViele Grüße,\nBMI Deutschland GmbH"
-    
-    msg.set_content(body_text)
-
-    # Foto anhängen
-    if foto_path and os.path.exists(foto_path):
-        with open(foto_path, 'rb') as f:
-            file_data = f.read()
-            file_name = os.path.basename(foto_path)
-            msg.add_attachment(file_data, maintype='image', subtype='jpeg', filename=file_name)
-
     try:
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
+        msg = EmailMessage()
+        datum_str = datetime.now().strftime('%d.%m.%Y %H:%M')
+        
+        msg['Subject'] = f"📸 Neues Flipchart-Foto: {thema if thema else datum_str}"
+        msg['From'] = sender_email
+        msg['To'] = empfaenger_email
+
+        body_text = f"Hallo zusammen,\n\nanbei befindet sich ein neues Flipchart-Foto vom {datum_str}.\n"
+        if thema:
+            body_text += f"Thema / Betreff: {thema}\n"
+        body_text += "\nViele Grüße,\nBMI Deutschland GmbH"
+        
+        msg.set_content(body_text)
+
+        # Foto anhängen
+        if foto_path and os.path.exists(foto_path):
+            with open(foto_path, 'rb') as f:
+                file_data = f.read()
+                file_name = os.path.basename(foto_path)
+                msg.add_attachment(file_data, maintype='image', subtype='jpeg', filename=file_name)
+
+        # Verbindung aufbauen
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
             server.starttls()
             server.login(sender_email, sender_password)
             server.send_message(msg)
         return True
     except Exception as e:
-        print(f"Fehler beim E-Mail-Versand: {e}")
+        print(f"❌ FEHLER BEIM E-MAIL-VERSAND: {str(e)}")
         return False
 
 # --- DATENBANK INITIALISIEREN ---
@@ -98,6 +99,7 @@ HTML_TEMPLATE = '''
         .save-btn { width: 100%; background-color: #16a34a; color: white; font-size: 18px; font-weight: 800; padding: 16px; border: none; border-radius: 12px; cursor: pointer; margin-top: 10px; }
         .send-email-btn { width: 100%; background-color: #009ee3; color: white; font-size: 18px; font-weight: 800; padding: 16px; border: none; border-radius: 12px; cursor: pointer; margin-top: 10px; }
         .success-box { background-color: #dcfce7; color: #166534; padding: 12px; border-radius: 10px; text-align: center; font-weight: 700; margin-bottom: 15px; border: 1px solid #bbf7d0; }
+        .error-box { background-color: #fee2e2; color: #991b1b; padding: 12px; border-radius: 10px; text-align: center; font-weight: 700; margin-bottom: 15px; border: 1px solid #fca5a5; }
         .section-title { font-weight: 800; color: #0369a1; margin-top: 0; border-bottom: 2px solid #e0f2fe; padding-bottom: 8px; }
     </style>
 </head>
@@ -107,8 +109,10 @@ HTML_TEMPLATE = '''
 <div class="card" style="border-top-color: #009ee3;">
     <h3 class="section-title">📸 Flipchart an Verteiler senden</h3>
 
-    {% if email_sent %}
+    {% if email_sent == '1' %}
     <div class="success-box">📧 Flipchart-Foto wurde erfolgreich per E-Mail versendet!</div>
+    {% elif email_sent == '0' %}
+    <div class="error-box">⚠️ E-Mail konnte nicht gesendet werden! Bitte Log-Dateien auf Render prüfen.</div>
     {% endif %}
 
     <form action="/send-flipchart" method="POST" enctype="multipart/form-data">
@@ -210,6 +214,70 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
+# --- ÜBERSICHTSTEMPLATE (BROWSER-LISTE) ---
+LIST_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMI - Erfasste Meldungen</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; background: #f8fafc; margin: 0; padding: 20px; color: #1e293b; }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        h2 { color: #009ee3; margin-top: 0; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 12px; border: 1px solid #e2e8f0; text-align: left; }
+        th { background-color: #009ee3; color: white; }
+        tr:nth-child(even) { background-color: #f8fafc; }
+        .btn { display: inline-block; background: #009ee3; color: white; padding: 10px 15px; border-radius: 8px; text-decoration: none; font-weight: bold; margin-bottom: 15px; }
+        .img-link { color: #0284c7; font-weight: bold; text-decoration: none; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>📊 Erfasste Ausschussmeldungen</h2>
+    <a href="/" class="btn">⬅️ Zurück zur Erfassung</a>
+
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Datum</th>
+                <th>Schicht</th>
+                <th>Arbeitsplatz</th>
+                <th>Fehlergrund</th>
+                <th>Stk.</th>
+                <th>Foto</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in eintraege %}
+            <tr>
+                <td>{{ row[0] }}</td>
+                <td>{{ row[1] }}</td>
+                <td>{{ row[2] }}</td>
+                <td>{{ row[3] }}</td>
+                <td>{{ row[4] }}</td>
+                <td><b>{{ row[5] }}</b></td>
+                <td>
+                    {% if row[6] %}
+                    <a href="/uploads/{{ row[6] }}" target="_blank" class="img-link">🖼️ Foto</a>
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+</body>
+</html>
+'''
+
 # --- ROUTEN ---
 @app.route('/')
 def index():
@@ -230,9 +298,11 @@ def send_flipchart():
         foto.save(foto_pfad)
 
         # E-Mail versenden
-        send_flipchart_email(verteiler, foto_pfad, thema)
+        erfolg = send_flipchart_email(verteiler, foto_pfad, thema)
+        status = "1" if erfolg else "0"
+        return redirect(url_for('index', email_sent=status))
 
-    return redirect(url_for('index', email_sent=1))
+    return redirect(url_for('index', email_sent="0"))
 
 @app.route('/speichern', methods=['POST'])
 def speichern():
@@ -259,6 +329,15 @@ def speichern():
     conn.close()
 
     return redirect(url_for('index', success=1))
+
+@app.route('/liste')
+def liste():
+    conn = sqlite3.connect('giesserei.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, datum, schicht, arbeitsplatz, fehlergrund, stueckzahl, foto FROM ausschuss ORDER BY id DESC')
+    eintraege = cursor.fetchall()
+    conn.close()
+    return render_template_string(LIST_TEMPLATE, eintraege=eintraege)
 
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
