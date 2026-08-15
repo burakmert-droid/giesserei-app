@@ -1,5 +1,7 @@
 import os
 import sqlite3
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime
 from flask import Flask, request, redirect, url_for, render_template_string, send_from_directory, Response
 
@@ -7,6 +9,48 @@ app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# --- E-MAIL VERTEILER FUNKTION ---
+def send_flipchart_email(empfaenger_email, foto_path, thema=""):
+    smtp_server = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
+    smtp_port = int(os.environ.get('SMTP_PORT', 587))
+    sender_email = os.environ.get('SMTP_EMAIL', '')
+    sender_password = os.environ.get('SMTP_PASSWORD', '')
+
+    if not sender_email or not sender_password:
+        print("E-Mail Zugangsdaten nicht konfiguriert.")
+        return False
+
+    msg = EmailMessage()
+    datum_str = datetime.now().strftime('%d.%m.%Y %H:%M')
+    
+    msg['Subject'] = f"📸 Neues Flipchart-Foto: {thema if thema else datum_str}"
+    msg['From'] = sender_email
+    msg['To'] = empfaenger_email
+
+    body_text = f"Hallo zusammen,\n\nanbei befindet sich ein neues Flipchart-Foto vom {datum_str}.\n"
+    if thema:
+        body_text += f"Thema / Betreff: {thema}\n"
+    body_text += "\nViele Grüße,\nBMI Deutschland GmbH"
+    
+    msg.set_content(body_text)
+
+    # Foto anhängen
+    if foto_path and os.path.exists(foto_path):
+        with open(foto_path, 'rb') as f:
+            file_data = f.read()
+            file_name = os.path.basename(foto_path)
+            msg.add_attachment(file_data, maintype='image', subtype='jpeg', filename=file_name)
+
+    try:
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"Fehler beim E-Mail-Versand: {e}")
+        return False
 
 # --- DATENBANK INITIALISIEREN ---
 def init_db():
@@ -29,139 +73,65 @@ def init_db():
 
 init_db()
 
-# --- MASKENTEMPLATE (ERFASSUNG) ---
+# --- MASKENTEMPLATE ---
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="de">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BMI Deutschland GmbH - Qualitäts-Erfassung</title>
+    <title>BMI Deutschland GmbH - Qualitäts- & Flipchart-Erfassung</title>
     <style>
-        :root {
-            --bmi-blue: #009ee3;
-            --bmi-dark: #0f172a;
-            --bmi-bg: #f0f9ff;
-        }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background-color: var(--bmi-bg);
-            margin: 0;
-            padding: 12px;
-            color: #334155;
-        }
-        .card {
-            max-width: 500px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 4px 20px rgba(0,158,227,0.12);
-            padding: 20px;
-            border-top: 8px solid var(--bmi-blue);
-        }
-        .header {
-            text-align: center;
-            border-bottom: 2px solid #e0f2fe;
-            padding-bottom: 15px;
-            margin-bottom: 20px;
-        }
-        .logo-box {
-            background-color: var(--bmi-blue);
-            color: white;
-            display: inline-block;
-            font-size: 32px;
-            font-weight: 900;
-            letter-spacing: 2px;
-            padding: 6px 20px;
-            border-radius: 8px;
-        }
-        .sub-title {
-            font-size: 13px;
-            color: #0369a1;
-            text-transform: uppercase;
-            font-weight: 800;
-            margin-top: 6px;
-        }
-        .form-group {
-            margin-bottom: 18px;
-        }
-        label {
-            display: block;
-            font-weight: 700;
-            font-size: 14px;
-            margin-bottom: 6px;
-            color: var(--bmi-dark);
-        }
-        input, select {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #bae6fd;
-            border-radius: 10px;
-            font-size: 16px;
-            box-sizing: border-box;
-            background-color: #fff;
-            color: #0f172a;
-        }
-        .btn-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 8px;
-        }
-        .btn-option {
-            background: #f0f9ff;
-            border: 2px solid #bae6fd;
-            padding: 12px 6px;
-            border-radius: 10px;
-            text-align: center;
-            font-weight: 700;
-            font-size: 14px;
-            cursor: pointer;
-            color: #0369a1;
-            transition: all 0.2s;
-        }
-        input[type="radio"] {
-            display: none;
-        }
-        input[type="radio"]:checked + .btn-option {
-            background-color: var(--bmi-blue);
-            color: white;
-            border-color: var(--bmi-blue);
-        }
-        .save-btn {
-            width: 100%;
-            background-color: #16a34a;
-            color: white;
-            font-size: 18px;
-            font-weight: 800;
-            padding: 16px;
-            border: none;
-            border-radius: 12px;
-            cursor: pointer;
-            margin-top: 10px;
-            box-shadow: 0 4px 12px rgba(22, 163, 74, 0.3);
-        }
-        .success-box {
-            background-color: #dcfce7;
-            color: #166534;
-            padding: 12px;
-            border-radius: 10px;
-            text-align: center;
-            font-weight: 700;
-            margin-bottom: 15px;
-            border: 1px solid #bbf7d0;
-        }
-        .list-link {
-            display: block;
-            text-align: center;
-            margin-top: 15px;
-            color: #0284c7;
-            font-weight: bold;
-            text-decoration: none;
-        }
+        :root { --bmi-blue: #009ee3; --bmi-dark: #0f172a; --bmi-bg: #f0f9ff; }
+        body { font-family: -apple-system, sans-serif; background-color: var(--bmi-bg); margin: 0; padding: 12px; color: #334155; }
+        .card { max-width: 500px; margin: 0 auto 20px auto; background: white; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,158,227,0.12); padding: 20px; border-top: 8px solid var(--bmi-blue); }
+        .header { text-align: center; border-bottom: 2px solid #e0f2fe; padding-bottom: 15px; margin-bottom: 20px; }
+        .logo-box { background-color: var(--bmi-blue); color: white; display: inline-block; font-size: 32px; font-weight: 900; padding: 6px 20px; border-radius: 8px; }
+        .sub-title { font-size: 13px; color: #0369a1; text-transform: uppercase; font-weight: 800; margin-top: 6px; }
+        .form-group { margin-bottom: 18px; }
+        label { display: block; font-weight: 700; font-size: 14px; margin-bottom: 6px; color: var(--bmi-dark); }
+        input, select { width: 100%; padding: 12px; border: 2px solid #bae6fd; border-radius: 10px; font-size: 16px; box-sizing: border-box; background-color: #fff; }
+        .btn-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+        .btn-option { background: #f0f9ff; border: 2px solid #bae6fd; padding: 12px 6px; border-radius: 10px; text-align: center; font-weight: 700; font-size: 14px; cursor: pointer; color: #0369a1; }
+        input[type="radio"] { display: none; }
+        input[type="radio"]:checked + .btn-option { background-color: var(--bmi-blue); color: white; border-color: var(--bmi-blue); }
+        .save-btn { width: 100%; background-color: #16a34a; color: white; font-size: 18px; font-weight: 800; padding: 16px; border: none; border-radius: 12px; cursor: pointer; margin-top: 10px; }
+        .send-email-btn { width: 100%; background-color: #009ee3; color: white; font-size: 18px; font-weight: 800; padding: 16px; border: none; border-radius: 12px; cursor: pointer; margin-top: 10px; }
+        .success-box { background-color: #dcfce7; color: #166534; padding: 12px; border-radius: 10px; text-align: center; font-weight: 700; margin-bottom: 15px; border: 1px solid #bbf7d0; }
+        .section-title { font-weight: 800; color: #0369a1; margin-top: 0; border-bottom: 2px solid #e0f2fe; padding-bottom: 8px; }
     </style>
 </head>
 <body>
 
+<!-- CARD 1: FLIPCHART VERTEILER -->
+<div class="card" style="border-top-color: #009ee3;">
+    <h3 class="section-title">📸 Flipchart an Verteiler senden</h3>
+
+    {% if email_sent %}
+    <div class="success-box">📧 Flipchart-Foto wurde erfolgreich per E-Mail versendet!</div>
+    {% endif %}
+
+    <form action="/send-flipchart" method="POST" enctype="multipart/form-data">
+        <div class="form-group">
+            <label>📌 Thema / Betreff (Optional)</label>
+            <input type="text" name="thema" placeholder="z. B. Schichtübergabe / KVP Meeting">
+        </div>
+
+        <div class="form-group">
+            <label>✉️ Verteiler E-Mail Adresse</label>
+            <input type="email" name="verteiler" placeholder="verteiler@bmi-deutschland.de" required>
+        </div>
+
+        <div class="form-group">
+            <label>📷 Flipchart abfotografieren</label>
+            <input type="file" name="flipchart_foto" accept="image/*" capture="environment" required>
+        </div>
+
+        <button type="submit" class="send-email-btn">🚀 FLIPCHART JETZT SENDEN</button>
+    </form>
+</div>
+
+<!-- CARD 2: QUALITÄTS-ERFASSUNG -->
 <div class="card">
     <div class="header">
         <div class="logo-box">BMI</div>
@@ -169,9 +139,7 @@ HTML_TEMPLATE = '''
     </div>
 
     {% if success %}
-    <div class="success-box">
-        ✅ Erfolgreich gespeichert!
-    </div>
+    <div class="success-box">✅ Ausschuss erfolgreich gespeichert!</div>
     {% endif %}
 
     <form action="/speichern" method="POST" enctype="multipart/form-data">
@@ -232,74 +200,10 @@ HTML_TEMPLATE = '''
             <input type="file" name="foto" accept="image/*" capture="environment">
         </div>
 
-        <button type="submit" class="save-btn">💾 SPEICHERN</button>
+        <button type="submit" class="save-btn">💾 AUSSCHUSS SPEICHERN</button>
     </form>
     
-    <a href="/liste" class="list-link">📊 Gespeicherte Einträge ansehen</a>
-</div>
-
-</body>
-</html>
-'''
-
-# --- ÜBERSICHTSTEMPLATE (BROWSER-LISTE) ---
-LIST_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="de">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BMI - Erfasste Meldungen</title>
-    <style>
-        body { font-family: -apple-system, sans-serif; background: #f8fafc; margin: 0; padding: 20px; color: #1e293b; }
-        .container { max-width: 900px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
-        h2 { color: #009ee3; margin-top: 0; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-        th, td { padding: 12px; border: 1px solid #e2e8f0; text-align: left; }
-        th { background-color: #009ee3; color: white; }
-        tr:nth-child(even) { background-color: #f8fafc; }
-        .btn { display: inline-block; background: #009ee3; color: white; padding: 10px 15px; border-radius: 8px; text-decoration: none; font-weight: bold; margin-bottom: 15px; }
-        .img-link { color: #0284c7; font-weight: bold; text-decoration: none; }
-    </style>
-</head>
-<body>
-
-<div class="container">
-    <h2>📊 Erfasste Ausschussmeldungen</h2>
-    <a href="/" class="btn">⬅️ Zurück zur Erfassung</a>
-
-    <table>
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>Datum</th>
-                <th>Schicht</th>
-                <th>Arbeitsplatz</th>
-                <th>Fehlergrund</th>
-                <th>Stk.</th>
-                <th>Foto</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for row in eintraege %}
-            <tr>
-                <td>{{ row[0] }}</td>
-                <td>{{ row[1] }}</td>
-                <td>{{ row[2] }}</td>
-                <td>{{ row[3] }}</td>
-                <td>{{ row[4] }}</td>
-                <td><b>{{ row[5] }}</b></td>
-                <td>
-                    {% if row[6] %}
-                    <a href="/uploads/{{ row[6] }}" target="_blank" class="img-link">🖼️ Foto</a>
-                    {% else %}
-                    -
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    <a href="/liste" style="display:block; text-align:center; margin-top:15px; color:#0284c7; font-weight:bold; text-decoration:none;">📊 Gespeicherte Einträge ansehen</a>
 </div>
 
 </body>
@@ -311,7 +215,24 @@ LIST_TEMPLATE = '''
 def index():
     heute = datetime.now().strftime('%Y-%m-%d')
     success = request.args.get('success')
-    return render_template_string(HTML_TEMPLATE, heute=heute, success=success)
+    email_sent = request.args.get('email_sent')
+    return render_template_string(HTML_TEMPLATE, heute=heute, success=success, email_sent=email_sent)
+
+@app.route('/send-flipchart', methods=['POST'])
+def send_flipchart():
+    thema = request.form.get('thema', '')
+    verteiler = request.form.get('verteiler')
+    foto = request.files.get('flipchart_foto')
+
+    if foto and foto.filename != '':
+        dateiname = f"flipchart_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{foto.filename}"
+        foto_pfad = os.path.join(app.config['UPLOAD_FOLDER'], dateiname)
+        foto.save(foto_pfad)
+
+        # E-Mail versenden
+        send_flipchart_email(verteiler, foto_pfad, thema)
+
+    return redirect(url_for('index', email_sent=1))
 
 @app.route('/speichern', methods=['POST'])
 def speichern():
@@ -325,8 +246,8 @@ def speichern():
     foto_pfad = ""
     if foto and foto.filename != '':
         dateiname = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{foto.filename}"
-        foto.save(os.path.join(app.config['UPLOAD_FOLDER'], dateiname))
         foto_pfad = dateiname
+        foto.save(os.path.join(app.config['UPLOAD_FOLDER'], dateiname))
 
     conn = sqlite3.connect('giesserei.db')
     cursor = conn.cursor()
@@ -339,20 +260,10 @@ def speichern():
 
     return redirect(url_for('index', success=1))
 
-@app.route('/liste')
-def liste():
-    conn = sqlite3.connect('giesserei.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT id, datum, schicht, arbeitsplatz, fehlergrund, stueckzahl, foto FROM ausschuss ORDER BY id DESC')
-    eintraege = cursor.fetchall()
-    conn.close()
-    return render_template_string(LIST_TEMPLATE, eintraege=eintraege)
-
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-# --- GOOGLE SHEETS LIVE EXPORT ---
 @app.route('/export')
 def export():
     conn = sqlite3.connect('giesserei.db')
