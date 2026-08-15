@@ -1,19 +1,14 @@
 import os
 import sqlite3
-import io
-import base64
 from datetime import datetime
-from flask import Flask, request, redirect, url_for, send_from_directory
-import qrcode
+from flask import Flask, request, redirect, url_for, render_template_string, send_from_directory, Response
 
 app = Flask(__name__)
-
-# Ordner für Uploads
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# Datenbank initialisieren
+# --- DATENBANK INITIALISIEREN ---
 def init_db():
     conn = sqlite3.connect('giesserei.db')
     cursor = conn.cursor()
@@ -21,10 +16,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS ausschuss (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             datum TEXT,
-            bauteil TEXT,
-            grund TEXT,
-            menge INTEGER,
-            foto_pfad TEXT
+            schicht TEXT,
+            arbeitsplatz TEXT,
+            fehlergrund TEXT,
+            stueckzahl INTEGER,
+            foto TEXT,
+            zeitstempel TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
@@ -32,152 +29,347 @@ def init_db():
 
 init_db()
 
-# Globale Variable für den QR-Code
-GLOBAL_QR_BASE64 = ""
+# --- MASKENTEMPLATE (ERFASSUNG) ---
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMI Deutschland GmbH - Qualitäts-Erfassung</title>
+    <style>
+        :root {
+            --bmi-blue: #009ee3;
+            --bmi-dark: #0f172a;
+            --bmi-bg: #f0f9ff;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bmi-bg);
+            margin: 0;
+            padding: 12px;
+            color: #334155;
+        }
+        .card {
+            max-width: 500px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 4px 20px rgba(0,158,227,0.12);
+            padding: 20px;
+            border-top: 8px solid var(--bmi-blue);
+        }
+        .header {
+            text-align: center;
+            border-bottom: 2px solid #e0f2fe;
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+        }
+        .logo-box {
+            background-color: var(--bmi-blue);
+            color: white;
+            display: inline-block;
+            font-size: 32px;
+            font-weight: 900;
+            letter-spacing: 2px;
+            padding: 6px 20px;
+            border-radius: 8px;
+        }
+        .sub-title {
+            font-size: 13px;
+            color: #0369a1;
+            text-transform: uppercase;
+            font-weight: 800;
+            margin-top: 6px;
+        }
+        .form-group {
+            margin-bottom: 18px;
+        }
+        label {
+            display: block;
+            font-weight: 700;
+            font-size: 14px;
+            margin-bottom: 6px;
+            color: var(--bmi-dark);
+        }
+        input, select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #bae6fd;
+            border-radius: 10px;
+            font-size: 16px;
+            box-sizing: border-box;
+            background-color: #fff;
+            color: #0f172a;
+        }
+        .btn-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+        }
+        .btn-option {
+            background: #f0f9ff;
+            border: 2px solid #bae6fd;
+            padding: 12px 6px;
+            border-radius: 10px;
+            text-align: center;
+            font-weight: 700;
+            font-size: 14px;
+            cursor: pointer;
+            color: #0369a1;
+            transition: all 0.2s;
+        }
+        input[type="radio"] {
+            display: none;
+        }
+        input[type="radio"]:checked + .btn-option {
+            background-color: var(--bmi-blue);
+            color: white;
+            border-color: var(--bmi-blue);
+        }
+        .save-btn {
+            width: 100%;
+            background-color: #16a34a;
+            color: white;
+            font-size: 18px;
+            font-weight: 800;
+            padding: 16px;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            margin-top: 10px;
+            box-shadow: 0 4px 12px rgba(22, 163, 74, 0.3);
+        }
+        .success-box {
+            background-color: #dcfce7;
+            color: #166534;
+            padding: 12px;
+            border-radius: 10px;
+            text-align: center;
+            font-weight: 700;
+            margin-bottom: 15px;
+            border: 1px solid #bbf7d0;
+        }
+        .list-link {
+            display: block;
+            text-align: center;
+            margin-top: 15px;
+            color: #0284c7;
+            font-weight: bold;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
 
-@app.route('/', methods=['GET', 'POST'])
+<div class="card">
+    <div class="header">
+        <div class="logo-box">BMI</div>
+        <div class="sub-title">Deutschland GmbH • Gießerei Qualitätssicherung</div>
+    </div>
+
+    {% if success %}
+    <div class="success-box">
+        ✅ Erfolgreich gespeichert!
+    </div>
+    {% endif %}
+
+    <form action="/speichern" method="POST" enctype="multipart/form-data">
+        <div class="form-group">
+            <label>📅 Datum</label>
+            <input type="date" name="datum" value="{{ heute }}" required>
+        </div>
+
+        <div class="form-group">
+            <label>⏰ Schicht</label>
+            <div class="btn-grid">
+                <label><input type="radio" name="schicht" value="Früh" checked><div class="btn-option">🌅 Früh</div></label>
+                <label><input type="radio" name="schicht" value="Spät"><div class="btn-option">🌆 Spät</div></label>
+                <label><input type="radio" name="schicht" value="Nacht"><div class="btn-option">🌙 Nacht</div></label>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label>📍 Arbeitsplatz / Maschine</label>
+            <select name="arbeitsplatz" required>
+                <optgroup label="Gießmaschinen">
+                    <option value="Gießmaschine 1">Gießmaschine 1</option>
+                    <option value="Gießmaschine 2">Gießmaschine 2</option>
+                    <option value="Gießmaschine 3">Gießmaschine 3</option>
+                    <option value="Gießmaschine 4">Gießmaschine 4</option>
+                    <option value="Gießmaschine 5">Gießmaschine 5</option>
+                    <option value="Gießmaschine 6">Gießmaschine 6</option>
+                    <option value="Gießmaschine 7">Gießmaschine 7</option>
+                </optgroup>
+                <optgroup label="Bearbeitung">
+                    <option value="Bohrstation 1">Bohrstation 1</option>
+                    <option value="Bohrstation 2">Bohrstation 2</option>
+                    <option value="Bohrstation 3">Bohrstation 3</option>
+                    <option value="Schleifzelle">Schleifzelle</option>
+                    <option value="Fräsmaschine">Fräsmaschine</option>
+                </optgroup>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label>⚠️ Fehlergrund</label>
+            <div class="btn-grid" style="grid-template-columns: repeat(2, 1fr);">
+                <label><input type="radio" name="fehlergrund" value="Blasen" checked><div class="btn-option">🫧 Blasen</div></label>
+                <label><input type="radio" name="fehlergrund" value="Risse"><div class="btn-option">⚡ Risse</div></label>
+                <label><input type="radio" name="fehlergrund" value="Kaltguss"><div class="btn-option">❄️ Kaltguss</div></label>
+                <label><input type="radio" name="fehlergrund" value="Einfallstellen"><div class="btn-option">🕳️ Einfallstellen</div></label>
+                <label style="grid-column: span 2;"><input type="radio" name="fehlergrund" value="Sonstiges"><div class="btn-option">❓ Sonstiges</div></label>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label>🔢 Stückzahl Ausschuss</label>
+            <input type="number" name="stueckzahl" value="1" min="1" required>
+        </div>
+
+        <div class="form-group">
+            <label>📷 Foto vom Fehler (Optional)</label>
+            <input type="file" name="foto" accept="image/*" capture="environment">
+        </div>
+
+        <button type="submit" class="save-btn">💾 SPEICHERN</button>
+    </form>
+    
+    <a href="/liste" class="list-link">📊 Gespeicherte Einträge ansehen</a>
+</div>
+
+</body>
+</html>
+'''
+
+# --- ÜBERSICHTSTEMPLATE (BROWSER-LISTE) ---
+LIST_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMI - Erfasste Meldungen</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; background: #f8fafc; margin: 0; padding: 20px; color: #1e293b; }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        h2 { color: #009ee3; margin-top: 0; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 12px; border: 1px solid #e2e8f0; text-align: left; }
+        th { background-color: #009ee3; color: white; }
+        tr:nth-child(even) { background-color: #f8fafc; }
+        .btn { display: inline-block; background: #009ee3; color: white; padding: 10px 15px; border-radius: 8px; text-decoration: none; font-weight: bold; margin-bottom: 15px; }
+        .img-link { color: #0284c7; font-weight: bold; text-decoration: none; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>📊 Erfasste Ausschussmeldungen</h2>
+    <a href="/" class="btn">⬅️ Zurück zur Erfassung</a>
+
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Datum</th>
+                <th>Schicht</th>
+                <th>Arbeitsplatz</th>
+                <th>Fehlergrund</th>
+                <th>Stk.</th>
+                <th>Foto</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in eintraege %}
+            <tr>
+                <td>{{ row[0] }}</td>
+                <td>{{ row[1] }}</td>
+                <td>{{ row[2] }}</td>
+                <td>{{ row[3] }}</td>
+                <td>{{ row[4] }}</td>
+                <td><b>{{ row[5] }}</b></td>
+                <td>
+                    {% if row[6] %}
+                    <a href="/uploads/{{ row[6] }}" target="_blank" class="img-link">🖼️ Foto</a>
+                    {% else %}
+                    -
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+</body>
+</html>
+'''
+
+# --- ROUTEN ---
+@app.route('/')
 def index():
-    if request.method == 'POST':
-        bauteil = request.form.get('bauteil')
-        grund = request.form.get('grund')
-        menge = request.form.get('menge')
-        foto = request.files.get('foto')
-        
-        foto_dateiname = ""
-        if foto and foto.filename != '':
-            zeitstempel = datetime.now().strftime("%Y%m%d_%H%M%S")
-            foto_dateiname = f"{zeitstempel}_{foto.filename}"
-            foto.save(os.path.join(app.config['UPLOAD_FOLDER'], foto_dateiname))
+    heute = datetime.now().strftime('%Y-%m-%d')
+    success = request.args.get('success')
+    return render_template_string(HTML_TEMPLATE, heute=heute, success=success)
 
-        conn = sqlite3.connect('giesserei.db')
-        cursor = conn.cursor()
-        datum_aktuell = datetime.now().strftime("%d.%m.%Y %H:%M")
-        cursor.execute('''
-            INSERT INTO ausschuss (datum, bauteil, grund, menge, foto_pfad)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (datum_aktuell, bauteil, grund, menge, foto_dateiname))
-        conn.commit()
-        conn.close()
+@app.route('/speichern', methods=['POST'])
+def speichern():
+    datum = request.form.get('datum')
+    schicht = request.form.get('schicht')
+    arbeitsplatz = request.form.get('arbeitsplatz')
+    fehlergrund = request.form.get('fehlergrund')
+    stueckzahl = request.form.get('stueckzahl')
+    
+    foto = request.files.get('foto')
+    foto_pfad = ""
+    if foto and foto.filename != '':
+        dateiname = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{foto.filename}"
+        foto.save(os.path.join(app.config['UPLOAD_FOLDER'], dateiname))
+        foto_pfad = dateiname
 
-        return redirect(url_for('index'))
-
-    # Alle Daten aus der Datenbank laden
     conn = sqlite3.connect('giesserei.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT datum, bauteil, grund, menge, foto_pfad FROM ausschuss ORDER BY id DESC')
-    eintraege = cursor.fetchall()
+    cursor.execute('''
+        INSERT INTO ausschuss (datum, schicht, arbeitsplatz, fehlergrund, stueckzahl, foto)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (datum, schicht, arbeitsplatz, fehlergrund, stueckzahl, foto_pfad))
+    conn.commit()
     conn.close()
 
-    tabelle_html = ""
-    for e in eintraege:
-        foto_link = f'<a href="/uploads/{e[4]}" target="_blank" style="color: #007bff; font-weight: bold;">📷 Ansehen</a>' if e[4] else "Kein Foto"
-        tabelle_html += f"""
-        <tr style="border-bottom: 1px solid #ddd;">
-            <td style="padding: 12px 8px;">{e[0]}</td>
-            <td style="padding: 12px 8px;"><b>{e[1]}</b></td>
-            <td style="padding: 12px 8px;">{e[2]}</td>
-            <td style="padding: 12px 8px; text-align: center;"><b>{e[3]}</b></td>
-            <td style="padding: 12px 8px;">{foto_link}</td>
-        </tr>
-        """
+    return redirect(url_for('index', success=1))
 
-    # QR-Code Anzeige
-    qr_html = ""
-    if GLOBAL_QR_BASE64:
-        qr_html = f'''
-        <div style="text-align: center; margin-bottom: 25px; padding: 15px; background: #f8f9fa; border-radius: 8px;">
-            <p style="margin-top: 0; font-weight: bold; color: #333; font-size: 16px;">📱 Mit dem Handy scannen (LTE/5G & WLAN):</p>
-            <img src="data:image/png;base64,{GLOBAL_QR_BASE64}" style="width: 220px; height: 220px; border: 2px solid #333; border-radius: 8px;">
-        </div>
-        '''
-
-    return f"""
-    <!DOCTYPE html>
-    <html lang="de">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Gießerei Erfassung</title>
-        <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 15px; background-color: #f0f2f5; }}
-            .container {{ max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
-            h2 {{ text-align: center; color: #1a1a1a; margin-top: 0; }}
-            label {{ font-size: 16px; font-weight: bold; color: #444; display: block; margin-top: 15px; }}
-            input, select {{ width: 100%; padding: 14px; margin-top: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 8px; font-size: 16px; background-color: #f9f9f9; }}
-            input[type="file"] {{ background-color: white; padding: 10px; }}
-            button {{ width: 100%; padding: 16px; background-color: #d9534f; color: white; border: none; font-size: 18px; font-weight: bold; cursor: pointer; border-radius: 8px; margin-top: 25px; }}
-            button:active {{ background-color: #c9302c; }}
-            table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }}
-            th {{ background-color: #222; color: white; padding: 10px; text-align: left; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h2>🔥 Gießerei Erfassung</h2>
-            
-            {qr_html}
-
-            <form method="POST" enctype="multipart/form-data">
-                <label>Bauteil Name / Nummer:</label>
-                <input type="text" name="bauteil" placeholder="z.B. Gehäuse V8 / Guss-ID 402" required>
-
-                <label>Ausschussgrund:</label>
-                <select name="grund">
-                    <option value="Lunker / Porosität">Lunker / Porosität</option>
-                    <option value="Formfehler / Sandeinschluss">Formfehler / Sandeinschluss</option>
-                    <option value="Rissbildung">Rissbildung</option>
-                    <option value="Maßabweichung">Maßabweichung</option>
-                    <option value="Kaltlauf">Kaltlauf</option>
-                </select>
-
-                <label>Menge (Stück):</label>
-                <input type="number" name="menge" value="1" min="1" required>
-
-                <label>Foto vom Gussfehler (optional):</label>
-                <input type="file" name="foto" accept="image/*">
-
-                <button type="submit">Ausschuss Speichern</button>
-            </form>
-
-            <hr style="margin: 35px 0 20px 0; border: 0; border-top: 1px solid #eee;">
-
-            <h3>📊 Erfasste Fehler</h3>
-            <table>
-                <tr>
-                    <th>Datum</th>
-                    <th>Bauteil</th>
-                    <th>Grund</th>
-                    <th>Stk</th>
-                    <th>Foto</th>
-                </tr>
-                {tabelle_html if tabelle_html else '<tr><td colspan="5" style="padding:15px; text-align:center;">Noch keine Einträge vorhanden.</td></tr>'}
-            </table>
-        </div>
-    </body>
-    </html>
-    """
+@app.route('/liste')
+def liste():
+    conn = sqlite3.connect('giesserei.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, datum, schicht, arbeitsplatz, fehlergrund, stueckzahl, foto FROM ausschuss ORDER BY id DESC')
+    eintraege = cursor.fetchall()
+    conn.close()
+    return render_template_string(LIST_TEMPLATE, eintraege=eintraege)
 
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-if __name__ == '__main__':
-    try:
-        from pyngrok import ngrok, conf
-        conf.get_default().auth_token = "3Hwd4Uh1XHedLe6KHzHHiPq5doX_4bKFz2pgxQMovhAugoxzc"
-        public_url = ngrok.connect(5000).public_url
-        
-        # QR-Code direkt für den HTML-Code erzeugen
-        qr_img = qrcode.make(public_url)
-        buffer = io.BytesIO()
-        qr_img.save(buffer, format="PNG")
-        GLOBAL_QR_BASE64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        
-        print("\n" + "="*60)
-        print("📱 ÖFFENTLICHE HANDY-ADRESSE (LTE/5G & WLAN):")
-        print(f"   {public_url}")
-        print("="*60 + "\n")
-    except Exception as e:
-        print("\n⚠️ ngrok/QR-Code konnte nicht geladen werden:", e)
+# --- GOOGLE SHEETS LIVE EXPORT ---
+@app.route('/export')
+def export():
+    conn = sqlite3.connect('giesserei.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, datum, schicht, arbeitsplatz, fehlergrund, stueckzahl, zeitstempel FROM ausschuss')
+    data = cursor.fetchall()
+    conn.close()
 
-    app.run(port=5000, debug=False)
+    csv_data = "ID,Datum,Schicht,Arbeitsplatz,Fehlergrund,Stueckzahl,Zeitstempel\n"
+    for row in data:
+        csv_data += f'"{row[0]}","{row[1]}","{row[2]}","{row[3]}","{row[4]}","{row[5]}","{row[6]}"\n'
+
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={"Content-Type": "text/csv; charset=utf-8"}
+    )
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
