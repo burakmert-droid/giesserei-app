@@ -10,15 +10,15 @@ UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# --- E-MAIL VERTEILER FUNKTION (MIT SICHERHEITS-CATCH) ---
+# --- E-MAIL VERTEILER FUNKTION (MIT SSL PORT 465 & TIMEOUT) ---
 def send_flipchart_email(empfaenger_email, foto_path, thema=""):
     smtp_server = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
-    smtp_port = int(os.environ.get('SMTP_PORT', 587))
+    smtp_port = int(os.environ.get('SMTP_PORT', 465))
     sender_email = os.environ.get('SMTP_EMAIL', '')
     sender_password = os.environ.get('SMTP_PASSWORD', '')
 
     if not sender_email or not sender_password:
-        print("❌ FEHLER: SMTP_EMAIL oder SMTP_PASSWORD fehlt in den Render Variables!")
+        print("❌ FEHLER: SMTP_EMAIL oder SMTP_PASSWORD nicht konfiguriert!")
         return False
 
     try:
@@ -43,11 +43,18 @@ def send_flipchart_email(empfaenger_email, foto_path, thema=""):
                 file_name = os.path.basename(foto_path)
                 msg.add_attachment(file_data, maintype='image', subtype='jpeg', filename=file_name)
 
-        # Verbindung aufbauen
-        with smtplib.SMTP(smtp_server, smtp_port, timeout=10) as server:
-            server.starttls()
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
+        # Verbindung über SSL (Port 465) mit 8 Sekunden Timeout
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=8) as server:
+                server.login(sender_email, sender_password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_server, smtp_port, timeout=8) as server:
+                server.starttls()
+                server.login(sender_email, sender_password)
+                server.send_message(msg)
+                
+        print("✅ E-Mail erfolgreich gesendet!")
         return True
     except Exception as e:
         print(f"❌ FEHLER BEIM E-MAIL-VERSAND: {str(e)}")
@@ -112,7 +119,7 @@ HTML_TEMPLATE = '''
     {% if email_sent == '1' %}
     <div class="success-box">📧 Flipchart-Foto wurde erfolgreich per E-Mail versendet!</div>
     {% elif email_sent == '0' %}
-    <div class="error-box">⚠️ E-Mail konnte nicht gesendet werden! Bitte Log-Dateien auf Render prüfen.</div>
+    <div class="error-box">⚠️ E-Mail konnte nicht gesendet werden! Bitte SMTP-Zugangsdaten auf Render prüfen.</div>
     {% endif %}
 
     <form action="/send-flipchart" method="POST" enctype="multipart/form-data">
