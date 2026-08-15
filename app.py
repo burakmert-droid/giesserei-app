@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import urllib.request
+import urllib.error
 import json
 import base64
 from datetime import datetime
@@ -11,13 +12,14 @@ UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# --- E-MAIL VERTEILER VIA RESEND API (KEIN SMTP BLOCKING) ---
+# --- E-MAIL VERTEILER VIA RESEND API ---
 def send_flipchart_email(empfaenger_email, foto_path, thema=""):
-    api_key = os.environ.get('RESEND_API_KEY', '')
+    api_key = os.environ.get('RESEND_API_KEY', '').strip()
 
     if not api_key:
-        print("❌ FEHLER: RESEND_API_KEY fehlt in den Render Variables!")
-        return False
+        msg = "RESEND_API_KEY fehlt in den Render Environment Variables!"
+        print(f"❌ FEHLER: {msg}")
+        return False, msg
 
     try:
         datum_str = datetime.now().strftime('%d.%m.%Y %H:%M')
@@ -59,13 +61,17 @@ def send_flipchart_email(empfaenger_email, foto_path, thema=""):
 
         with urllib.request.urlopen(req) as response:
             if response.status in [200, 201]:
-                print("✅ E-Mail erfolgreich über API versendet!")
-                return True
+                print("✅ E-Mail erfolgreich über Resend API versendet!")
+                return True, "OK"
 
-        return False
+        return False, "Unbekannter Antwortersatz von API"
+    except urllib.error.HTTPError as e:
+        error_content = e.read().decode('utf-8')
+        print(f"❌ RESEND API HTTP FEHLER ({e.code}): {error_content}")
+        return False, f"HTTP {e.code}: {error_content}"
     except Exception as e:
         print(f"❌ FEHLER BEIM E-MAIL-VERSAND (API): {str(e)}")
-        return False
+        return False, str(e)
 
 # --- DATENBANK INITIALISIEREN ---
 def init_db():
@@ -113,7 +119,7 @@ HTML_TEMPLATE = '''
         .save-btn { width: 100%; background-color: #16a34a; color: white; font-size: 18px; font-weight: 800; padding: 16px; border: none; border-radius: 12px; cursor: pointer; margin-top: 10px; }
         .send-email-btn { width: 100%; background-color: #009ee3; color: white; font-size: 18px; font-weight: 800; padding: 16px; border: none; border-radius: 12px; cursor: pointer; margin-top: 10px; }
         .success-box { background-color: #dcfce7; color: #166534; padding: 12px; border-radius: 10px; text-align: center; font-weight: 700; margin-bottom: 15px; border: 1px solid #bbf7d0; }
-        .error-box { background-color: #fee2e2; color: #991b1b; padding: 12px; border-radius: 10px; text-align: center; font-weight: 700; margin-bottom: 15px; border: 1px solid #fca5a5; }
+        .error-box { background-color: #fee2e2; color: #991b1b; padding: 12px; border-radius: 10px; text-align: center; font-weight: 700; margin-bottom: 15px; border: 1px solid #fca5a5; font-size: 13px; word-break: break-word; }
         .section-title { font-weight: 800; color: #0369a1; margin-top: 0; border-bottom: 2px solid #e0f2fe; padding-bottom: 8px; }
     </style>
 </head>
@@ -125,8 +131,8 @@ HTML_TEMPLATE = '''
 
     {% if email_sent == '1' %}
     <div class="success-box">📧 Flipchart-Foto wurde erfolgreich per E-Mail versendet!</div>
-    {% elif email_sent == '0' %}
-    <div class="error-box">⚠️ E-Mail konnte nicht gesendet werden! Bitte RESEND_API_KEY auf Render prüfen.</div>
+    {% elif err_msg %}
+    <div class="error-box">⚠️ E-Mail konnte nicht gesendet werden:<br><b>{{ err_msg }}</b></div>
     {% endif %}
 
     <form action="/send-flipchart" method="POST" enctype="multipart/form-data">
@@ -298,7 +304,8 @@ def index():
     heute = datetime.now().strftime('%Y-%m-%d')
     success = request.args.get('success')
     email_sent = request.args.get('email_sent')
-    return render_template_string(HTML_TEMPLATE, heute=heute, success=success, email_sent=email_sent)
+    err_msg = request.args.get('err_msg')
+    return render_template_string(HTML_TEMPLATE, heute=heute, success=success, email_sent=email_sent, err_msg=err_msg)
 
 @app.route('/send-flipchart', methods=['POST'])
 def send_flipchart():
@@ -312,11 +319,13 @@ def send_flipchart():
         foto.save(foto_pfad)
 
         # E-Mail via API versenden
-        erfolg = send_flipchart_email(verteiler, foto_pfad, thema)
-        status = "1" if erfolg else "0"
-        return redirect(url_for('index', email_sent=status))
+        erfolg, message = send_flipchart_email(verteiler, foto_pfad, thema)
+        if erfolg:
+            return redirect(url_for('index', email_sent="1"))
+        else:
+            return redirect(url_for('index', email_sent="0", err_msg=message))
 
-    return redirect(url_for('index', email_sent="0"))
+    return redirect(url_for('index', email_sent="0", err_msg="Keine Datei ausgewählt"))
 
 @app.route('/speichern', methods=['POST'])
 def speichern():
