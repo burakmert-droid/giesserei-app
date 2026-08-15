@@ -1,7 +1,8 @@
 import os
 import sqlite3
-import smtplib
-from email.message import EmailMessage
+import urllib.request
+import json
+import base64
 from datetime import datetime
 from flask import Flask, request, redirect, url_for, render_template_string, send_from_directory, Response
 
@@ -10,54 +11,60 @@ UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# --- E-MAIL VERTEILER FUNKTION (MIT SSL PORT 465 & TIMEOUT) ---
+# --- E-MAIL VERTEILER VIA RESEND API (KEIN SMTP BLOCKING) ---
 def send_flipchart_email(empfaenger_email, foto_path, thema=""):
-    smtp_server = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
-    smtp_port = int(os.environ.get('SMTP_PORT', 465))
-    sender_email = os.environ.get('SMTP_EMAIL', '')
-    sender_password = os.environ.get('SMTP_PASSWORD', '')
+    api_key = os.environ.get('RESEND_API_KEY', '')
 
-    if not sender_email or not sender_password:
-        print("❌ FEHLER: SMTP_EMAIL oder SMTP_PASSWORD nicht konfiguriert!")
+    if not api_key:
+        print("❌ FEHLER: RESEND_API_KEY fehlt in den Render Variables!")
         return False
 
     try:
-        msg = EmailMessage()
         datum_str = datetime.now().strftime('%d.%m.%Y %H:%M')
+        betreff = f"📸 Neues Flipchart-Foto: {thema if thema else datum_str}"
         
-        msg['Subject'] = f"📸 Neues Flipchart-Foto: {thema if thema else datum_str}"
-        msg['From'] = sender_email
-        msg['To'] = empfaenger_email
-
         body_text = f"Hallo zusammen,\n\nanbei befindet sich ein neues Flipchart-Foto vom {datum_str}.\n"
         if thema:
             body_text += f"Thema / Betreff: {thema}\n"
         body_text += "\nViele Grüße,\nBMI Deutschland GmbH"
-        
-        msg.set_content(body_text)
 
-        # Foto anhängen
+        # Bild in Base64 umwandeln
+        attachments = []
         if foto_path and os.path.exists(foto_path):
-            with open(foto_path, 'rb') as f:
-                file_data = f.read()
-                file_name = os.path.basename(foto_path)
-                msg.add_attachment(file_data, maintype='image', subtype='jpeg', filename=file_name)
+            with open(foto_path, "rb") as f:
+                encoded_string = base64.b64encode(f.read()).decode('utf-8')
+                attachments.append({
+                    "filename": os.path.basename(foto_path),
+                    "content": encoded_string
+                })
 
-        # Verbindung über SSL (Port 465) mit 8 Sekunden Timeout
-        if smtp_port == 465:
-            with smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=8) as server:
-                server.login(sender_email, sender_password)
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP(smtp_server, smtp_port, timeout=8) as server:
-                server.starttls()
-                server.login(sender_email, sender_password)
-                server.send_message(msg)
-                
-        print("✅ E-Mail erfolgreich gesendet!")
-        return True
+        # Resend API Payload
+        payload = {
+            "from": "BMI Flipchart <onboarding@resend.dev>",
+            "to": [empfaenger_email],
+            "subject": betreff,
+            "text": body_text,
+            "attachments": attachments
+        }
+
+        req = urllib.request.Request(
+            'https://api.resend.com/emails',
+            data=json.dumps(payload).encode('utf-8'),
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json'
+            },
+            method='POST'
+        )
+
+        with urllib.request.urlopen(req) as response:
+            if response.status in [200, 201]:
+                print("✅ E-Mail erfolgreich über API versendet!")
+                return True
+
+        return False
     except Exception as e:
-        print(f"❌ FEHLER BEIM E-MAIL-VERSAND: {str(e)}")
+        print(f"❌ FEHLER BEIM E-MAIL-VERSAND (API): {str(e)}")
         return False
 
 # --- DATENBANK INITIALISIEREN ---
@@ -119,7 +126,7 @@ HTML_TEMPLATE = '''
     {% if email_sent == '1' %}
     <div class="success-box">📧 Flipchart-Foto wurde erfolgreich per E-Mail versendet!</div>
     {% elif email_sent == '0' %}
-    <div class="error-box">⚠️ E-Mail konnte nicht gesendet werden! Bitte SMTP-Zugangsdaten auf Render prüfen.</div>
+    <div class="error-box">⚠️ E-Mail konnte nicht gesendet werden! Bitte RESEND_API_KEY auf Render prüfen.</div>
     {% endif %}
 
     <form action="/send-flipchart" method="POST" enctype="multipart/form-data">
@@ -304,7 +311,7 @@ def send_flipchart():
         foto_pfad = os.path.join(app.config['UPLOAD_FOLDER'], dateiname)
         foto.save(foto_pfad)
 
-        # E-Mail versenden
+        # E-Mail via API versenden
         erfolg = send_flipchart_email(verteiler, foto_pfad, thema)
         status = "1" if erfolg else "0"
         return redirect(url_for('index', email_sent=status))
